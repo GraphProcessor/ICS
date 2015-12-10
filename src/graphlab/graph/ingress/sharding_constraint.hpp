@@ -53,14 +53,14 @@
 namespace graphlab {
   class sharding_constraint {
     size_t nshards;
-    std::vector<std::vector<procid_t> > constraint_graph;
 
     std::vector<std::vector<std::vector<procid_t> > > joint_nbr_cache;
    public:
+    std::vector<std::vector<procid_t> > constraint_graph;
     /// Test if the provided num_shards can be used for grid construction: 
     //    n == nrow*ncol  && (abs(nrow-ncol) <= 2)
     static bool is_grid_compatible(size_t num_shards, int& nrow, int& ncol) {
-      double approx_sqrt = sqrt(num_shards);
+      double approx_sqrt = sqrt(num_shards);   //////square root the shards
       nrow = floor(approx_sqrt);
       for (ncol = nrow; ncol <= nrow + 2; ++ncol) {
         if (ncol * nrow == (int)num_shards) {
@@ -74,7 +74,12 @@ namespace graphlab {
       p = floor(sqrt(num_shards-1));
       return (p>0 && ((p*p+p+1) == (int)num_shards));
     }
-
+    
+/*    struct key{
+		procid_t key1;
+		procid_t key2;
+	};
+*/
    public:
     sharding_constraint(size_t num_shards, std::string method) {
       nshards = num_shards;
@@ -88,9 +93,9 @@ namespace graphlab {
         logstream(LOG_FATAL) << "Unknown sharding constraint method: " << method << std::endl;
       }
 
-      joint_nbr_cache.resize(num_shards);
+      joint_nbr_cache.resize(num_shards);///reform a cache
       for (size_t i = 0; i < num_shards; ++i) {
-        joint_nbr_cache[i].resize(num_shards);
+        joint_nbr_cache[i].resize(num_shards);  //reform each vector in the cache
         for (size_t j = 0; j < num_shards; ++j) {
           compute_neighbors(i, j, joint_nbr_cache[i][j]);
           ASSERT_GT(joint_nbr_cache[i][j].size(), 0);
@@ -109,8 +114,9 @@ namespace graphlab {
 
     
     const std::vector<procid_t>& get_joint_neighbors (procid_t shardi, procid_t shardj) {
-      return joint_nbr_cache[shardi][shardj];
+	return joint_nbr_cache[shardi][shardj];
     }
+    
 
    private:
     void make_grid_constraint() {

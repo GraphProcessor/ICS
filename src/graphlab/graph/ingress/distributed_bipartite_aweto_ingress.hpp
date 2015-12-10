@@ -1,5 +1,5 @@
-/*  
- * Copyright (c) 2013 Shanghai Jiao Tong University. 
+/**
+ * Copyright (c) 2013 Institute of Parallel and Distributed Systems, Shanghai Jiao Tong University.
  *     All rights reserved.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,9 +17,6 @@
  * For more about this software visit:
  *
  *      http://ipads.se.sjtu.edu.cn/projects/powerlyra.html
- *
- *
- * 2014.04  implement bipartite-aware partitioning with heuristic (aweto)
  *
  */
 

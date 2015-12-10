@@ -1,5 +1,5 @@
-/*  
- * Copyright (c) 2013 Shanghai Jiao Tong University. 
+/**
+ * Copyright (c) 2013 Institute of Parallel and Distributed Systems, Shanghai Jiao Tong University.
  *     All rights reserved.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,9 +17,6 @@
  * For more about this software visit:
  *
  *      http://ipads.se.sjtu.edu.cn/projects/powerlyra.html
- *
- *
- * 2013.11  implement hybrid partitioning with heuristic (ginger)
  *
  */
 
@@ -42,7 +39,7 @@
 #include <map>
 #include <set>
 #include <algorithm>
-
+#include <limits>
 #include <graphlab/macros_def.hpp>
 
 #define TUNING
@@ -84,7 +81,7 @@ namespace graphlab {
         vertex_buffer_type;
 
     typedef typename boost::unordered_map<vertex_id_type, 
-      std::vector<edge_buffer_record> > raw_map_type;
+      std::vector<edge_buffer_record> > raw_map_type; /////Shuang Song: raw_map, unordered
     
     /// detail vertex record for the second pass coordination. 
     typedef typename base_type::vertex_negotiator_record 
@@ -132,6 +129,7 @@ namespace graphlab {
     std::vector<size_t> proc_balance;
     std::vector<size_t> proc_score_incr;
     buffered_exchange< proc_score_pair_type > proc_score_exchange;
+    size_t total_balance;
 
     /// heuristic model from fennel
     /// records about the number of edges and vertices in the graph
@@ -168,7 +166,7 @@ namespace graphlab {
       
       gamma = 1.5;
       alpha = sqrt(dc.numprocs()) * double(tot_nedges) / pow(tot_nverts, gamma);
-
+      total_balance = 0;
       /* fast pass for standalone case. */
       standalone = hybrid_rpc.numprocs() == 1;
       hybrid_rpc.barrier();
@@ -183,8 +181,24 @@ namespace graphlab {
     void add_edge(vertex_id_type source, vertex_id_type target,
                   const EdgeData& edata) {
       const edge_buffer_record record(source, target, edata);
-      const procid_t owning_proc = standalone ? 0 :
-        graph_hash::hash_vertex(target) % hybrid_rpc.numprocs();
+//      const procid_t owning_proc = standalone ? 0 :
+  //      graph_hash::hash_vertex(target) % hybrid_rpc.numprocs();
+
+	procid_t owning_proc = 0;
+        if(standalone == 1){
+                owning_proc = 0;
+        }
+        else{
+                if(base_type::graph.skew_enabled_tmp == true){
+			owning_proc = base_type::graph.skew_list[graph_hash::hash_vertex(target) % base_type::graph.skew_list.size()];
+                }
+                else{
+                        owning_proc = graph_hash::hash_vertex(target) % hybrid_rpc.numprocs();
+                }
+        }
+
+//	logstream(LOG_EMPH) << "add_edge has been used in ginger" << std::endl;
+
 #ifdef _OPENMP
       hybrid_edge_exchange.send(owning_proc, record, omp_get_thread_num());
 #else
@@ -196,8 +210,24 @@ namespace graphlab {
     /* add vdata */
     void add_vertex(vertex_id_type vid, const VertexData& vdata) { 
       const vertex_buffer_record record(vid, vdata);
-      const procid_t owning_proc = standalone ? 0 :
-        graph_hash::hash_vertex(vid) % hybrid_rpc.numprocs();
+     // const procid_t owning_proc = standalone ? 0 :
+       // graph_hash::hash_vertex(vid) % hybrid_rpc.numprocs();
+
+	procid_t owning_proc = 0;
+	 if(standalone == 1){
+                owning_proc = 0;
+        }
+        else{
+                if(base_type::graph.skew_enabled_tmp == true){
+			owning_proc = base_type::graph.skew_list[graph_hash::hash_vertex(vid) % base_type::graph.skew_list.size()];
+                }
+                else{
+                        owning_proc = graph_hash::hash_vertex(vid) % hybrid_rpc.numprocs();
+                }
+        }
+
+//	logstream(LOG_EMPH) << "add_vertex has been used in ginger as well" << std::endl;
+
 #ifdef _OPENMP
       hybrid_vertex_exchange.send(owning_proc, record, omp_get_thread_num());
 #else
@@ -219,8 +249,7 @@ namespace graphlab {
       }
     
       for (size_t i = 0; i < nprocs; ++i) {
-        proc_score[i] = proc_degrees[i] 
-                      - alpha * gamma * pow(proc_balance[i], (gamma - 1));
+	proc_score[i] = proc_degrees[i]  - alpha * gamma * pow(proc_balance[i], (gamma - 1));
       }
     
       double best_score = proc_score[0];
@@ -234,6 +263,49 @@ namespace graphlab {
 
       return best_proc;
     };
+
+    /* ginger heuristic for low-degree vertex */
+    procid_t ginger_to_proc_skew (const vertex_id_type target,
+        const std::vector<edge_buffer_record>& records) {
+      size_t nprocs = hybrid_rpc.numprocs();    
+      std::vector<double> proc_score(nprocs);
+      std::vector<int> proc_degrees(nprocs);
+    //  double total_balance = 0;
+
+      for (size_t i = 0; i < records.size(); ++i) {
+        if (mht.find(records[i].source) != mht.end())
+          proc_degrees[mht[records[i].source]]++;
+      }
+
+ //     for(size_t i = 0; i < nprocs; ++i){
+ //     	 total_balance += proc_balance[i];
+ //     }
+
+      for (size_t i = 0; i < nprocs; ++i) {
+        /* Version 1  */
+	double weight = base_type::graph.skew_vector[i] / base_type::graph.skew_sum;
+
+        //logstream(LOG_EMPH) << "weight: " << weight <<  " " << proc_balance[i] << ":" << total_balance << std::endl;
+	if ( weight <=  (1.05 * proc_balance[i] / total_balance)) {
+		proc_score[i] = -INFINITY;
+	} else {
+		proc_score[i] = (proc_degrees[i]  - alpha * gamma * pow(((1 - weight) * proc_balance[i]), (gamma - 1)));
+        }
+
+      }
+      
+      /*Version 1*/
+      double best_score = proc_score[0];
+      procid_t best_proc = 0;
+      for (size_t i = 1; i < nprocs; ++i) {
+        if (proc_score[i] > best_score) {
+	  	best_score = proc_score[i];
+         	best_proc = i;
+	}
+      }
+	return best_proc;
+    };
+
 
     /* ginger heuristic for low-degree vertex */
     void sync_heuristic() {
@@ -275,7 +347,7 @@ namespace graphlab {
       graphlab::timer ti;
       size_t nprocs = hybrid_rpc.numprocs();
       procid_t l_procid = hybrid_rpc.procid();      
-      raw_map_type raw_map;
+      raw_map_type raw_map;  ///////raw_map defined here
       size_t vcount = 0;
 
       // collect edges
@@ -309,12 +381,28 @@ namespace graphlab {
 
         if (degree > threshold) {
           // TODO: no need send, just resend latter
-          owning_proc = graph_hash::hash_vertex(target) % nprocs;
+
+	  //Shuang Song: adding skewing method here to adjust owning proc decision
+	  //logstream(LOG_EMPH) << "HIGH_DEGREE" << std::endl;
+
+	  if(base_type::graph.skew_enabled_tmp == true){
+		owning_proc = base_type::graph.skew_list[graph_hash::hash_vertex(target) % base_type::graph.skew_list.size()];
+	  }else{
+		owning_proc = graph_hash::hash_vertex(target) % nprocs;
+          }
+
           for (size_t i = 0; i < degree; ++i)
             high_edge_exchange.send(owning_proc, it->second[i]);
         } else {
-          owning_proc = ginger_to_proc(target, it->second);
-          for (size_t i = 0; i < degree; ++i)
+	//  logstream(LOG_EMPH) << "LOW_DEGREE" << std::endl;
+	// Shuang sONG: Low-degree skew method added here 
+	//  continue;
+	  if(base_type::graph.skew_enabled_tmp == true){
+		owning_proc = ginger_to_proc_skew(target, it->second);
+	  }else{
+         	owning_proc = ginger_to_proc(target, it->second);
+          }
+	  for (size_t i = 0; i < degree; ++i)
             low_edge_exchange.send(owning_proc, it->second[i]);
 
           // update mht and nedges_incr
@@ -329,6 +417,8 @@ namespace graphlab {
           proc_balance[owning_proc]++;
           proc_balance[owning_proc] += 
               (degree * float(tot_nverts) / float(tot_nedges));
+
+	  total_balance += 1 + (degree * float(tot_nverts) / float(tot_nedges));
 
           proc_score_incr[owning_proc]++;
           proc_score_incr[owning_proc] += 
@@ -444,9 +534,17 @@ namespace graphlab {
         procid_t proc = -1;
         while(low_edge_exchange.recv(proc, edge_buffer)) {
           foreach(const edge_buffer_record& rec, edge_buffer) {
-            if (mht.find(rec.source) == mht.end())
-              mht[rec.source] = graph_hash::hash_vertex(rec.source) % nprocs;   
-
+            if (mht.find(rec.source) == mht.end()){
+		////Shuang Song, skew
+           	if(base_type::graph.skew_enabled_tmp == true){
+			mht[rec.source] = base_type::graph.skew_list[graph_hash::hash_vertex(rec.source) % base_type::graph.skew_list.size()];
+                }
+                else{
+                        mht[rec.source] = graph_hash::hash_vertex(rec.source) % nprocs;
+                }
+	    }
+	    //  mht[rec.source] = graph_hash::hash_vertex(rec.source) % nprocs;   
+	   
             hybrid_edges.push_back(rec);
           }
         }
@@ -466,8 +564,18 @@ namespace graphlab {
         proc = -1;
         while(high_edge_exchange.recv(proc, edge_buffer)) {
           foreach(const edge_buffer_record& rec, edge_buffer) {
-            if (mht.find(rec.source) == mht.end())
-              mht[rec.source] = graph_hash::hash_vertex(rec.source) % nprocs; 
+		////Shuang Song, skew
+            if (mht.find(rec.source) == mht.end()){
+              	if(base_type::graph.skew_enabled_tmp == true){
+			mht[rec.source] = base_type::graph.skew_list[graph_hash::hash_vertex(rec.source) % base_type::graph.skew_list.size()];
+                }
+                else{
+                        mht[rec.source] = graph_hash::hash_vertex(rec.source) % nprocs;
+                }
+	//	mht[rec.source] = graph_hash::hash_vertex(rec.source) % nprocs; 
+	    }
+
+	   ////   mht[rec.source] = graph_hash::hash_vertex(rec.source) % nprocs; 
 
             const procid_t owner_proc = mht[rec.source];
             if (owner_proc == l_procid) {
@@ -740,8 +848,17 @@ namespace graphlab {
           procid_t proc = -1;
           while (hybrid_vertex_exchange.recv(proc, vertex_buffer)) {
             foreach (const vertex_buffer_record& rec, vertex_buffer) {
-              if (mht.find(rec.vid) == mht.end())
-                mht[rec.vid] = graph_hash::hash_vertex(rec.vid) % nprocs; 
+            	////Shuang Song: skew
+	      if (mht.find(rec.vid) == mht.end()){
+		if(base_type::graph.skew_enabled_tmp == true){
+			mht[rec.vid] = base_type::graph.skew_list[graph_hash::hash_vertex(rec.vid) % base_type::graph.skew_list.size()];
+                }
+                else{
+                        mht[rec.vid] = graph_hash::hash_vertex(rec.vid) % nprocs;
+                }	
+	      }
+
+//                mht[rec.vid] = graph_hash::hash_vertex(rec.vid) % nprocs; 
               resend_vertex_exchange.send(mht[rec.vid], rec);
             }
           }
@@ -805,8 +922,16 @@ namespace graphlab {
           if (standalone) {
             vrec.owner = 0;
           } else {
-            if (mht.find(pair.first) == mht.end())
-              mht[pair.first] = graph_hash::hash_vertex(pair.first) % nprocs; 
+		//Shuang Song: skew
+            if (mht.find(pair.first) == mht.end()){
+		if(base_type::graph.skew_enabled_tmp == true){
+			mht[pair.first] = base_type::graph.skew_list[graph_hash::hash_vertex(pair.first) % base_type::graph.skew_list.size()];
+                }
+                else{
+                        mht[pair.first] = graph_hash::hash_vertex(pair.first) % nprocs;
+                }
+	    }
+              //mht[pair.first] = graph_hash::hash_vertex(pair.first) % nprocs; 
             vrec.owner = mht[pair.first];
           }
         }

@@ -1,5 +1,5 @@
-/*  
- * Copyright (c) 2013 Shanghai Jiao Tong University. 
+/**
+ * Copyright (c) 2013 Institute of Parallel and Distributed Systems, Shanghai Jiao Tong University.
  *     All rights reserved.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,10 +18,8 @@
  *
  *      http://ipads.se.sjtu.edu.cn/projects/powerlyra.html
  *
- *
- * 2013.11  implement hybrid random partitioning
- *
  */
+
 
 
 #ifndef GRAPHLAB_DISTRIBUTED_HYBRID_INGRESS_HPP
@@ -100,9 +98,9 @@ namespace graphlab {
 
   public:
     distributed_hybrid_ingress(distributed_control& dc, 
-        graph_type& graph, size_t threshold = 100) :
+        graph_type& graph, size_t threshold = 100):
         base_type(dc, graph), hybrid_rpc(dc, this), 
-        graph(graph), threshold(threshold),
+        graph(graph), threshold(threshold), //skew_enabled(skew_enabled), 
 #ifdef _OPENMP
         hybrid_edge_exchange(dc, omp_get_max_threads()), 
         hybrid_vertex_exchange(dc, omp_get_max_threads())
@@ -122,11 +120,40 @@ namespace graphlab {
      *  This function acts as the first phase for SNAP graph to deliver edges
      *  via the hashing value of its target vertex.
      */
+
+
+    /*here maybe the place we get add the skew
+      Shuang Song*/
+
+
+//    logstream(LOG_EMPH) <<  "standalone: " << standalone << std:endl;
+
     void add_edge(vertex_id_type source, vertex_id_type target,
                   const EdgeData& edata) {
       const edge_buffer_record record(source, target, edata);      
-      const procid_t owning_proc = standalone ? 0 :
-        graph_hash::hash_vertex(target) % hybrid_rpc.numprocs();
+//      const procid_t owning_proc = standalone ? 0 :
+  //      graph_hash::hash_vertex(target) % hybrid_rpc.numprocs();
+
+//  logstream(LOG_EMPH) <<  "standalone: " << standalone << std::endl;
+//	logstream(LOG_EMPH) << "skew_enabled: " << base_type::graph.skew_enabled << std::endl;
+//	size_t random_probability = fmod(graph_hash::hash_vertex(target), base_type::graph.skew_sum);
+//	if(base_type::graph.skew_enabled_tmp == true){
+//	}
+
+//logstream(LOG_EMPH) << "add_edge has been used here" << std::endl;
+
+	procid_t owning_proc = 0;
+	if(standalone == 1){
+		owning_proc = 0;
+	}	
+	else{
+		if(base_type::graph.skew_enabled_tmp){
+			owning_proc = base_type::graph.skew_list[graph_hash::hash_vertex(target) % base_type::graph.skew_list.size()];
+		}
+		else{
+			owning_proc = graph_hash::hash_vertex(target) % hybrid_rpc.numprocs();
+		}	
+	}
 #ifdef _OPENMP
       hybrid_edge_exchange.send(owning_proc, record, omp_get_thread_num());
 #else
@@ -134,12 +161,29 @@ namespace graphlab {
 #endif
     } // end of add edge
 
-
+    
     /* add vdata */
     void add_vertex(vertex_id_type vid, const VertexData& vdata) { 
       const vertex_buffer_record record(vid, vdata);
-      const procid_t owning_proc = standalone ? 0 :
-        graph_hash::hash_vertex(vid) % hybrid_rpc.numprocs();        
+//      const procid_t owning_proc = standalone ? 0 :
+  //      graph_hash::hash_vertex(vid) % hybrid_rpc.numprocs();        
+
+  	logstream(LOG_EMPH) << "add_vertex has been used here" << std::endl;
+
+	procid_t owning_proc = 0;
+	if(standalone == 1){
+		owning_proc = 0;
+	}	
+	else{
+		if(base_type::graph.skew_enabled_tmp == true){
+			owning_proc = base_type::graph.skew_list[graph_hash::hash_vertex(vid) % base_type::graph.skew_list.size()];
+		}
+		else{
+			owning_proc = graph_hash::hash_vertex(vid) % hybrid_rpc.numprocs();
+		}	
+	}
+
+
 #ifdef _OPENMP
       hybrid_vertex_exchange.send(owning_proc, record, omp_get_thread_num());
 #else
@@ -230,9 +274,19 @@ namespace graphlab {
           for (size_t i = 0; i < hybrid_edges.size(); i++) {
             edge_buffer_record& rec = hybrid_edges[i];
             if (in_degree_set[rec.target] > threshold) {
-              const procid_t source_owner_proc = 
-                graph_hash::hash_vertex(rec.source) % nprocs;
-              if(source_owner_proc != l_procid){
+//              const procid_t source_owner_proc = 
+  //              graph_hash::hash_vertex(rec.source) % nprocs;
+    		////Shuang Song:: Just a try
+		procid_t source_owner_proc; 
+ 		if(base_type::graph.skew_enabled_tmp == true){
+			source_owner_proc = base_type::graph.skew_list[graph_hash::hash_vertex(rec.source) % base_type::graph.skew_list.size()];
+		}
+		else{
+			source_owner_proc = graph_hash::hash_vertex(rec.source) % nprocs;
+		}	
+
+
+             if(source_owner_proc != l_procid){
                 // re-send the edge of high-degree vertices according to source
                 hybrid_edge_exchange.send(source_owner_proc, rec);
                 // set re-sent edges as empty for skipping
@@ -546,9 +600,19 @@ namespace graphlab {
           vrec.gvid = pair.first;
           if (standalone)
             vrec.owner = 0;
-          else
-            vrec.owner = graph_hash::hash_vertex(pair.first) % nprocs;
-        }
+          else{  ///////////Shuang Song:: just give a try
+		if(base_type::graph.skew_enabled_tmp == true){
+			vrec.owner = base_type::graph.skew_list[graph_hash::hash_vertex(pair.first) % base_type::graph.skew_list.size()];
+		}
+		else{
+			vrec.owner = graph_hash::hash_vertex(pair.first) % nprocs;
+
+		//	owning_proc = graph_hash::hash_vertex(vid) % hybrid_rpc.numprocs();
+		}	
+
+           // vrec.owner = graph_hash::hash_vertex(pair.first) % nprocs;
+       	  }
+	 }
         ASSERT_EQ(local_nverts, graph.local_graph.num_vertices());
         ASSERT_EQ(graph.lvid2record.size(), graph.local_graph.num_vertices());
 #ifdef TUNING

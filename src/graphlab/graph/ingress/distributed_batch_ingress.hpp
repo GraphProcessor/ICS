@@ -110,7 +110,10 @@ namespace graphlab {
       base_type(dc, graph), rpc(dc, this), 
       num_edges(0), bufsize(bufsize), query_set(dc.numprocs()),
       proc_num_edges(dc.numprocs()), usehash(usehash), userecent(userecent) { 
-       rpc.barrier(); 
+       rpc.barrier();
+
+      /////Shuang Song:: adding for debug purpose
+      logstream(LOG_EMPH) << "phase1" <<std::endl; 
 
       INITIALIZE_TRACER(batch_ingress_add_edge, "Time spent in add edge");
       INITIALIZE_TRACER(batch_ingress_add_edges, "Time spent in add block edges" );
@@ -122,6 +125,7 @@ namespace graphlab {
 
     /** Adds an edge to the batch ingress buffer, and updates the query set. */
     void add_edge(vertex_id_type source, vertex_id_type target, const EdgeData& edata) {
+ //     logstream(LOG_EMPH) << "phase2---add_edge function" <<std::endl; 
       BEGIN_TRACEPOINT(batch_ingress_add_edge);
       edgesend_lock.lock();
       ASSERT_LT(edgesend.size(), bufsize);
@@ -132,11 +136,13 @@ namespace graphlab {
       ++num_edges;
       edgesend_lock.unlock();
       END_TRACEPOINT(batch_ingress_add_edge);
-      if (is_full()) flush();
+      if (is_full()) flush(); //{logstream(LOG_EMPH) << "flush edges since it is full............" << std::endl;  flush();}
     } // end of add_edge
 
-    /** Flush the buffer and call base finalize. */; 
+    /** Flush the buffer and call base finalize. */ ///; 
     void finalize() { 
+ //     logstream(LOG_EMPH) << "phase3----finalize function" <<std::endl; 
+
       rpc.full_barrier();
       flush(); 
       rpc.full_barrier();
@@ -151,6 +157,7 @@ namespace graphlab {
     void add_edges(const std::vector<vertex_id_type>& source_arr, 
         const std::vector<vertex_id_type>& target_arr, 
         const std::vector<EdgeData>& edata_arr) {
+ //      logstream(LOG_EMPH) << "phase4-----add_edgesssssss funtion" <<std::endl; 
 
       BEGIN_TRACEPOINT(batch_ingress_add_edges);
       ASSERT_TRUE((source_arr.size() == target_arr.size())

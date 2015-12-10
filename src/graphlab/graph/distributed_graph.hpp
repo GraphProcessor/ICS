@@ -1,29 +1,3 @@
-/*  
- * Copyright (c) 2013 Shanghai Jiao Tong University. 
- *     All rights reserved.
- *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing,
- *  software distributed under the License is distributed on an "AS
- *  IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- *  express or implied.  See the License for the specific language
- *  governing permissions and limitations under the License.
- *
- * For more about this software visit:
- *
- *      http://ipads.se.sjtu.edu.cn/projects/powerlyra.html
- *
- *
- * 2014.02  add calling to bipartitie-aware partitioning
- * 2013.11  add calling to hybrid partitioning for power-law graphs
- *
- */
-
 /**
  * Copyright (c) 2009 Carnegie Mellon University.
  *     All rights reserved.
@@ -105,8 +79,22 @@
 #include <graphlab/graph/ingress/distributed_random_ingress.hpp>
 #include <graphlab/graph/ingress/distributed_identity_ingress.hpp>
 
-#include <graphlab/graph/ingress/sharding_constraint.hpp>
+
+///////Shuang Song:: added batch ingress here
+#include <graphlab/graph/ingress/distributed_batch_ingress.hpp>
+
+
+
 #include <graphlab/graph/ingress/distributed_constrained_random_ingress.hpp>
+
+////Shuang Song, new random ingress classes
+#include <graphlab/graph/ingress/distributed_random_ingress_skew.hpp>
+#include <graphlab/graph/ingress/distributed_constrained_random_ingress_skew.hpp>
+#include <graphlab/graph/ingress/distributed_oblivious_ingress_skew.hpp>
+
+
+#include <graphlab/graph/ingress/sharding_constraint.hpp>
+///#include <graphlab/graph/ingress/distributed_constrained_random_ingress.hpp>
 
 // bipartite
 #include <graphlab/graph/ingress/distributed_bipartite_random_ingress.hpp>
@@ -442,15 +430,21 @@ namespace graphlab {
     friend class distributed_hybrid_ingress<VertexData, EdgeData>;
     friend class distributed_hybrid_ginger_ingress<VertexData, EdgeData>;
 
+    //	Shuang Song, new ingress classes
+    friend class distributed_batch_ingress<VertexData, EdgeData>;
+    friend class distributed_random_ingress_skew<VertexData, EdgeData>;
+    friend class distributed_constrained_random_ingress_skew<VertexData, EdgeData>;
+    friend class distributed_oblivious_ingress_skew<VertexData, EdgeData>;
+
     typedef graphlab::vertex_id_type vertex_id_type;
     typedef graphlab::lvid_type lvid_type;
     typedef graphlab::edge_id_type edge_id_type;
-
+////shuangsong, not in the original graphlab
     enum degree_type {HIGH = 0, LOW, NUM_DEGREE_TYPES};
 
     enum cuts_type {VERTEX_CUTS = 0, EDGE_CUTS, HYBRID_CUTS, HYBRID_GINGER_CUTS,
       NUM_CUTS_TYPES};
-
+//////////////////////////////////////////
     struct vertex_type;
     typedef bool edge_list_type;
     class edge_type;
@@ -458,6 +452,16 @@ namespace graphlab {
     struct local_vertex_type;
     struct local_edge_list_type;
     class local_edge_type;
+
+    /// Shuang Song: begin
+    //this is the cdf, where the key is the cumulative probability and the value is the node
+    std::vector<int> skew_list;
+    std::vector<int> skew_vector;
+    double skew_sum;
+    bool skew_enabled_tmp;
+    /// Shuang Song: end
+
+
 
     /**
      * \brief Vertex object which provides access to the vertex data
@@ -696,6 +700,9 @@ namespace graphlab {
       bool usehash = false;
       bool userecent = false;
 
+      ///// Shuang Song: new parameter
+      bool skew_enabled = false;
+
       std::vector<std::string> keys = opts.get_graph_args().get_option_keys();
       foreach(std::string opt, keys) {
         if (opt == "ingress") {
@@ -739,8 +746,75 @@ namespace graphlab {
           if (rpc.procid() == 0)
             logstream(LOG_EMPH) << "Graph Option: favorite = "
                                 << favorite << std::endl;
-        }
-        
+        } else if (opt == "skew_file") {    ////Shuang Song, new added on
+	  	std::string skew_file; 
+		printf("update");
+		//std::cout << "SHUANG SONG SKEWED\N" << std::endl;
+   		opts.get_graph_args().get_option("skew_file", skew_file);
+	  	skew_enabled = true;
+	 	if(rpc.procid() == 0) {
+			logstream(LOG_EMPH) << "skew file detected: " << skew_file << std::endl;
+		}
+		std::ifstream infile(skew_file.c_str());
+                if (!infile.is_open()) {
+			logstream(LOG_FATAL) << "Could not open skew file: " << skew_file << std::endl;
+		}
+             
+		std::map<std::string, int> skew_name_map;
+		int skew_value;
+		std::string hostname;
+		//create a map of hostnames to skew factors
+		while (infile >> hostname >> skew_value) {
+			skew_name_map[hostname] = skew_value;
+			logstream(LOG_EMPH) << "machine names: " << hostname << std::endl;
+			//just for debuging purpose
+		}
+
+                infile.close();
+		char c[MPI_MAX_PROCESSOR_NAME];
+		int name_length;
+		MPI_Get_processor_name(c, &name_length);
+		hostname = c;
+		logstream(LOG_EMPH) << "rank:hostname -> " << rpc.procid() << ":" << hostname << std::endl; 
+		///just for debuging purpose
+		/*
+ 		* do an all gather to get a std::vector<int>
+ 		* where the vector is indexed by proc_id and returns skew factor
+ 		*/
+		skew_vector.resize(rpc.numprocs());
+		skew_vector[rpc.procid()] = skew_name_map[hostname];
+		
+		rpc.all_gather(skew_vector);
+
+		// one final step, which changes the skew_vector into a cdf
+		skew_sum = 0;
+		int current_proc_id = 0;
+		skew_enabled_tmp = skew_enabled;
+
+		for(std::vector<int>::iterator it = skew_vector.begin(); it != skew_vector.end(); ++it) {
+			int skew_value = *it;
+			for (int i = 0; i < skew_value; ++i) {
+				skew_list.push_back(current_proc_id);
+			}
+			skew_sum += *it;
+			current_proc_id++;
+		}
+
+		if(rpc.procid() == 0){			
+			current_proc_id = 0;
+			for(std::vector<int>::iterator it = skew_vector.begin(); it != skew_vector.end(); ++it){
+				logstream(LOG_EMPH) << "Machine ( " << current_proc_id << ") has skew factor of " << *it << std::endl;
+				current_proc_id++;
+			}
+
+			for(std::vector<int>::iterator iter = skew_list.begin(); iter != skew_list.end(); ++iter){
+				logstream(LOG_EMPH) << "Skew List: " << *iter << " Node ID: " << std::endl;
+			}
+		}
+			
+	}
+        ///Shuang Song, new added on ends here 
+
         /**
          * These options below are deprecated.
          */
@@ -764,7 +838,7 @@ namespace graphlab {
         }
       }
       set_ingress_method(ingress_method, bufsize, usehash, userecent, favorite,
-        threshold, nedges, nverts, interval);
+        threshold, nedges, nverts, interval, skew_enabled);
     }
 
   public:
@@ -2460,6 +2534,9 @@ namespace graphlab {
      *                 since this function allocates a PDF vector of
      *                 "nverts" to sample from.
      */
+
+
+/* Shuang Song: this is where the synthetic powerlaw graph generated, called by each algorithm*/
     void load_synthetic_powerlaw(size_t nverts, bool in_degree = false,
                                  double alpha = 2.1, size_t truncate = (size_t)(-1)) {
       rpc.full_barrier();
@@ -3287,21 +3364,41 @@ namespace graphlab {
         size_t bufsize = 50000, bool usehash = false, bool userecent = false, 
         std::string favorite = "source",
         size_t threshold = 100, size_t nedges = 0, size_t nverts = 0,
-        size_t interval = std::numeric_limits<size_t>::max()) {
+        size_t interval = std::numeric_limits<size_t>::max(),
+	bool skew_enabled = false) {
       if(ingress_ptr != NULL) { delete ingress_ptr; ingress_ptr = NULL; }
-      if (method == "oblivious") {
+      if (method == "oblivious") {  ///last one to go
         if (rpc.procid() == 0) logstream(LOG_EMPH) << "Use oblivious ingress, usehash: " << usehash
           << ", userecent: " << userecent << std::endl;
-        ingress_ptr = new distributed_oblivious_ingress<VertexData, EdgeData>(rpc.dc(), *this, usehash, userecent);
+        if (skew_enabled){
+		ingress_ptr = new distributed_oblivious_ingress_skew<VertexData, EdgeData>(rpc.dc(), *this, usehash, userecent);
+	}
+	else {	
+		ingress_ptr = new distributed_oblivious_ingress<VertexData, EdgeData>(rpc.dc(), *this, usehash, userecent);
+	}
       } else if  (method == "random") {
         if (rpc.procid() == 0)logstream(LOG_EMPH) << "Use random ingress" << std::endl;
-        ingress_ptr = new distributed_random_ingress<VertexData, EdgeData>(rpc.dc(), *this); 
+        if(skew_enabled){
+		logstream(LOG_EMPH) << "Get in skew enabled random" << std::endl;
+		ingress_ptr = new distributed_random_ingress_skew<VertexData, EdgeData>(rpc.dc(), *this); 
+     	} else{
+		ingress_ptr = new distributed_random_ingress<VertexData, EdgeData>(rpc.dc(), *this); 
+	}
       } else if (method == "grid") {
         if (rpc.procid() == 0)logstream(LOG_EMPH) << "Use grid ingress" << std::endl;
-        ingress_ptr = new distributed_constrained_random_ingress<VertexData, EdgeData>(rpc.dc(), *this, "grid");
+      	if(skew_enabled){
+//		logstream(LOG_EMPH) << "Get in skew_enabled" << std::endl;
+ 		ingress_ptr = new distributed_constrained_random_ingress_skew<VertexData, EdgeData>(rpc.dc(), *this, "grid");
+     	} else{
+		ingress_ptr = new distributed_constrained_random_ingress<VertexData, EdgeData>(rpc.dc(), *this, "grid"); 		
+	}
       } else if (method == "pds") {
         if (rpc.procid() == 0)logstream(LOG_EMPH) << "Use pds ingress" << std::endl;
-        ingress_ptr = new distributed_constrained_random_ingress<VertexData, EdgeData>(rpc.dc(), *this, "pds");
+ 	if(skew_enabled){
+ 	        ingress_ptr = new distributed_constrained_random_ingress_skew<VertexData, EdgeData>(rpc.dc(), *this, "pds");
+	} else{
+		ingress_ptr = new distributed_constrained_random_ingress<VertexData, EdgeData>(rpc.dc(), *this, "pds");
+	}
       } else if (method == "bipartite") {
         if(data_affinity){
           if (rpc.procid() == 0) logstream(LOG_EMPH) << "Use bipartite ingress w/ affinity" << std::endl;
@@ -3313,15 +3410,18 @@ namespace graphlab {
       } else if (method == "bipartite_aweto") {
         if (rpc.procid() == 0) logstream(LOG_EMPH) << "Use bipartite_aweto ingress" << std::endl;
         ingress_ptr = new distributed_bipartite_aweto_ingress<VertexData, EdgeData>(rpc.dc(), *this, favorite);
-      } else if (method == "hybrid") {
+      } else if (method == "hybrid") { ///Shuang Song, here is the hybrid
         if (rpc.procid() == 0) logstream(LOG_EMPH) << "Use hybrid ingress" << std::endl;
-        ingress_ptr = new distributed_hybrid_ingress<VertexData, EdgeData>(rpc.dc(), *this, threshold);
+        ingress_ptr = new distributed_hybrid_ingress<VertexData, EdgeData>(rpc.dc(), *this, threshold); //skew_enabled);
         set_cuts_type(HYBRID_CUTS);
       } else if (method == "hybrid_ginger") {
         if (rpc.procid() == 0) logstream(LOG_EMPH) << "Use hybrid ginger ingress" << std::endl;
         ASSERT_GT(nedges, 0); ASSERT_GT(nverts, 0);
         ingress_ptr = new distributed_hybrid_ginger_ingress<VertexData, EdgeData>(rpc.dc(), *this, threshold, nedges, nverts, interval);
         set_cuts_type(HYBRID_GINGER_CUTS);
+      } else if(method == "batch"){          /////////////////Shuang 
+	if(rpc.procid() == 0) logstream(LOG_EMPH) << "Use batch ingress, bufsize: " << bufsize << ", usehash: " << usehash << ", userecent: " << userecent << std::endl;
+	ingress_ptr = new distributed_batch_ingress<VertexData, EdgeData>(rpc.dc(), *this, bufsize, usehash, userecent);
       } else {
         // use default ingress method if none is specified
         std::string ingress_auto = "";
